@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>DXC QA Call Randomizer</title>
+
+<style>
+:root{
+ --dxc-dark:#002A5C;
+ --dxc-blue:#0067B8;
+ --bg:#eef2f7;
+}
+body{font-family:Segoe UI;background:var(--bg);padding:20px}
+h2,h3{color:var(--dxc-dark)}
+.card{
+ background:white;padding:16px;border-radius:14px;
+ margin-bottom:16px;box-shadow:0 6px 14px rgba(0,0,0,.08)
+}
+button{
+ background:var(--dxc-blue);color:white;border:none;
+ padding:8px 14px;border-radius:8px;cursor:pointer;margin-right:6px
+}
+button.warn{background:#b00020}
+button.locked{background:#999;cursor:not-allowed}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th{background:var(--dxc-dark);color:white;padding:6px}
+td{border:1px solid #ddd;padding:5px}
+.yellow{background:#fff7cc}
+input,select,textarea{padding:6px;border-radius:6px;border:1px solid #ccc}
+textarea{width:100%;height:120px}
+.progress{height:12px;background:#e0e6ef;border-radius:10px;overflow:hidden}
+.progress div{height:100%;background:var(--dxc-blue)}
+.small{font-size:12px;color:#555}
+</style>
+</head>
+
+<body>
+
+<h2>DXC QA Call Randomizer</h2>
+
+<div class="card">
+ Reviewer <input id="reviewer">
+ Account <input id="account">
+ Weekly Quota <input id="quota" value="10" style="width:60px">
+ <button onclick="loadData()">Load Data</button><br><br>
+ <textarea id="raw" placeholder="Paste CX Export Here (TAB separated)"></textarea>
+</div>
+
+<div class="card">
+ Available <b id="ac">0</b> |
+ Audited <b id="hc">0</b> |
+ Productivity <b id="prod">0</b>/hr
+ <div class="progress"><div id="bar" style="width:0%"></div></div>
+ <div class="small" id="pace"></div>
+</div>
+
+<div class="card">
+<h3>Available Calls</h3>
+<div id="avail"></div>
+</div>
+
+<div class="card">
+ Agent <select id="agent"></select>
+ From <input type="date" id="from">
+ To <input type="date" id="to">
+ Duration
+ <select id="dtype">
+  <option>Super Short</option>
+  <option>Short</option>
+  <option>Long</option>
+  <option>Super Long</option>
+ </select>
+ Count <input id="count" value="1" style="width:50px">
+ <button onclick="generateAudit()">Generate Audit</button>
+</div>
+
+<div class="card">
+<h3>Audit History</h3>
+<div id="weekTabs"></div><br>
+<div id="hist"></div><br>
+
+<button onclick="exportCSV(false)">Export This Week</button>
+<button onclick="exportCSV(true)">Export All</button>
+<button class="warn" onclick="clearWeek()">Clear This Week</button>
+<button class="warn" onclick="clearAll()">Clear All History</button>
+</div>
+
+<script>
+/* ---------- STATE ---------- */
+let calls=[];
+let history=JSON.parse(localStorage.getItem("qaHistory")||"[]");
+let activeWeek=getCurrentWW();
+
+/* ---------- AUTO ROLLOVER ---------- */
+if(!history.find(h=>h.week===activeWeek)){
+ activeWeek=getCurrentWW();
+}
+
+/* ---------- LOAD DATA ---------- */
+function loadData(){
+ calls=[];
+ let rows=raw.value.trim().split("\n");
+ rows.shift();
+ let agents=new Set();
+
+ rows.forEach(r=>{
+  let c=r.split("\t");
+  if(c.length<11)return;
+  let sec=t2s(c[10]);
+  let call={
+   id:c[0],agent:c[6],date:c[3],interact:c[10],
+   sec,type:classify(sec),week:getWW(c[3])
+  };
+  if(!history.find(h=>h.id===call.id)){
+   calls.push(call);agents.add(call.agent);
+  }
+ });
+ agent.innerHTML=[...agents].map(a=>`<option>${a}</option>`).join("");
+ renderAll();
+}
+
+/* ---------- GENERATE ---------- */
+function generateAudit(){
+ let pool=calls.filter(c=>c.agent===agent.value && c.type===dtype.value && c.week===activeWeek);
+ if(!pool.length){alert("No calls match criteria");return;}
+ shuffle(pool);
+ let pick=pool[0];
+ history.push({...pick,reviewer:reviewer.value,account:account.value,start:null,cycle:null});
+ calls=calls.filter(c=>c.id!==pick.id);
+ save();renderAll();
+}
+
+/* ---------- HISTORY ---------- */
+function renderHistory(){
+ let h="<table><tr><th>ID</th><th>Agent</th><th>Date</th><th>Type</th><th>Start</th><th>Submit</th><th>Cycle</th></tr>";
+ history.filter(h=>h.week===activeWeek).forEach((c,i)=>{
+  h+=`<tr>
+   <td class="yellow">${c.id}</td>
+   <td>${c.agent}</td>
+   <td>${c.date}</td>
+   <td>${c.type}</td>
+   <td><button onclick="start(${i})">Start</button></td>
+   <td><button onclick="stop(${i})">Submit</button></td>
+   <td>${c.cycle||"00:00"}</td>
+  </tr>`;
+ });
+ hist.innerHTML=h+"</table>";
+}
+
+/* ---------- TIMERS ---------- */
+function start(i){history[i].start=Date.now();save();}
+function stop(i){
+ if(!history[i].start)return;
+ let s=Math.floor((Date.now()-history[i].start)/1000);
+ history[i].cycle=s2t(s);
+ save();renderAll();
+}
+
+/* ---------- TABS ---------- */
+function renderTabs(){
+ let weeks=[...new Set(history.map(h=>h.week))];
+ weekTabs.innerHTML=weeks.map(w=>{
+  let done=history.filter(x=>x.week===w).length>=quota.value;
+  return `<button class="${done?'locked':''}" onclick="setWeek('${w}')">${w}${done?' 🔒':''}</button>`;
+ }).join(" ");
+}
+function setWeek(w){activeWeek=w;renderAll();}
+
+/* ---------- CLEAR ---------- */
+function clearWeek(){
+ if(confirm("Clear current work week?")){
+  history=history.filter(h=>h.week!==activeWeek);
+  save();renderAll();
+ }
+}
+function clearAll(){
+ if(confirm("Clear ALL history?")){
+  history=[];save();renderAll();
+ }
+}
+
+/* ---------- EXPORT ---------- */
+function exportCSV(all){
+ let data=all?history:history.filter(h=>h.week===activeWeek);
+ if(!data.length)return;
+ let out="Reviewer,Account,Agent,ContactID,Date,Week,Type,Cycle\n";
+ data.forEach(h=>{
+  out+=`${h.reviewer},${h.account},${h.agent},${h.id},${h.date},${h.week},${h.type},${h.cycle||""}\n`;
+ });
+ let a=document.createElement("a");
+ a.href=URL.createObjectURL(new Blob([out]));
+ a.download=`${reviewer.value}_${account.value}_${all?"ALL":activeWeek}.csv`;
+ a.click();
+}
+
+/* ---------- STATS ---------- */
+function updateStats(){
+ ac.innerText=calls.length;
+ hc.innerText=history.length;
+ let done=history.filter(h=>h.week===activeWeek).length;
+ let q=+quota.value||1;
+ bar.style.width=Math.min(100,(done/q)*100)+"%";
+ pace.innerText=`${done}/${q} audits this week`;
+ let secs=history.reduce((t,h)=>h.cycle?t+t2s("0:"+h.cycle):t,0);
+ prod.innerText=secs?Math.round((history.length*3600)/secs):0;
+}
+
+/* ---------- HELPERS ---------- */
+function classify(s){return s<180?"Super Short":s<420?"Short":s<840?"Long":"Super Long";}
+function t2s(t){let p=t.split(":");return(+p[0])*3600+(+p[1])*60+(+p[2])}
+function s2t(s){let m=Math.floor(s/60),r=s%60;return String(m).padStart(2,"0")+":"+String(r).padStart(2,"0")}
+function shuffle(a){for(let i=a.length-1;i>0;i--){let j=Math.random()*(i+1)|0;[a[i],a[j]]=[a[j],a[i]]}}
+function save(){localStorage.setItem("qaHistory",JSON.stringify(history))}
+function renderAvailable(){avail.innerHTML=calls.length}
+function renderAll(){renderAvailable();renderHistory();renderTabs();updateStats();}
+
+/* ---------- WORK WEEK ---------- */
+function getWW(d){
+ let x=new Date(d);
+ let day=x.getDay();
+ let diff=5-day;if(diff<0)diff+=7;
+ x.setDate(x.getDate()+diff);
+ let m=String(x.getMonth()+1).padStart(2,"0");
+ let da=String(x.getDate()).padStart(2,"0");
+ let y=String(x.getFullYear()).slice(-2);
+ return `WW${m}${da}${y}`;
+}
+function getCurrentWW(){return getWW(new Date());}
+
+renderAll();
+</script>
+
+</body>
+</html>
+
+
+<footer>
+    callrandomizer_v12926_cdg
+</footer>
+
